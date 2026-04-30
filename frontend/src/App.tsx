@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { format } from 'date-fns';
 import { PlusCircle, AlertCircle, X, Wallet } from 'lucide-react';
 
-const API_URL = 'http://localhost:3000';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
 const expenseSchema = z.object({
   amount: z.number({ message: 'Amount is required' }).min(0.01, 'Amount must be greater than 0'),

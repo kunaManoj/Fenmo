@@ -10,7 +10,7 @@ describe('Expenses API', () => {
   });
 
   afterAll((done) => {
-    db.close();
+    db.end();
     done();
   });
 

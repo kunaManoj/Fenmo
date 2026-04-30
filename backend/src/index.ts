@@ -1,7 +1,7 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
-import db from './db';
+import pool from './db';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -28,20 +28,21 @@ const isValidExpense = (data: any): data is ExpenseRequest => {
 };
 
 // GET /expenses
-app.get('/expenses', (req: Request, res: Response) => {
+app.get('/expenses', async (req: Request, res: Response): Promise<any> => {
   const { category, sort, date } = req.query;
   
   let query = 'SELECT * FROM expenses';
   const params: any[] = [];
   const conditions: string[] = [];
+  let paramCount = 1;
   
   if (category) {
-    conditions.push('category = ?');
+    conditions.push(`category = $${paramCount++}`);
     params.push(category);
   }
 
   if (date) {
-    conditions.push('date = ?');
+    conditions.push(`date = $${paramCount++}`);
     params.push(date);
   }
   
@@ -57,33 +58,34 @@ app.get('/expenses', (req: Request, res: Response) => {
     query += ' ORDER BY created_at DESC';
   }
   
-  db.all(query, params, (err, rows) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ error: 'Failed to fetch expenses' });
-    }
-    res.json(rows);
-  });
+  try {
+    const { rows } = await pool.query(query, params);
+    // Convert DECIMAL to number for frontend
+    const formattedRows = rows.map(row => ({
+      ...row,
+      amount: parseFloat(row.amount)
+    }));
+    return res.json(formattedRows);
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Failed to fetch expenses' });
+  }
 });
 
 // POST /expenses
-app.post('/expenses', (req: Request, res: Response) => {
+app.post('/expenses', async (req: Request, res: Response): Promise<any> => {
   const idempotencyKey = req.headers['idempotency-key'] as string;
   
   if (!idempotencyKey) {
     return res.status(400).json({ error: 'Idempotency-Key header is required' });
   }
 
-  // Check if idempotency key exists
-  db.get('SELECT key FROM idempotency_keys WHERE key = ?', [idempotencyKey], (err, row) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ error: 'Internal server error' });
-    }
+  try {
+    // Check if idempotency key exists
+    const { rows } = await pool.query('SELECT key FROM idempotency_keys WHERE key = $1', [idempotencyKey]);
 
-    if (row) {
+    if (rows.length > 0) {
       // If key exists, it means we already processed this request.
-      // We could store the previous response, but for simplicity, we'll just return a success message.
       return res.status(200).json({ message: 'Expense already created (idempotent response)' });
     }
 
@@ -95,39 +97,35 @@ app.post('/expenses', (req: Request, res: Response) => {
     const { amount, category, description, date } = req.body;
     const id = crypto.randomUUID();
 
-    db.serialize(() => {
-      db.run('BEGIN TRANSACTION');
+    // Use a client for transactions
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
 
-      db.run(
-        'INSERT INTO idempotency_keys (key) VALUES (?)',
-        [idempotencyKey],
-        function(err) {
-          if (err) {
-            db.run('ROLLBACK');
-            return res.status(500).json({ error: 'Failed to save idempotency key' });
-          }
-        }
+      await client.query(
+        'INSERT INTO idempotency_keys (key) VALUES ($1)',
+        [idempotencyKey]
       );
 
-      db.run(
-        'INSERT INTO expenses (id, amount, category, description, date) VALUES (?, ?, ?, ?, ?)',
-        [id, amount, category, description || null, date],
-        function(err) {
-          if (err) {
-            db.run('ROLLBACK');
-            return res.status(500).json({ error: 'Failed to create expense' });
-          }
-          
-          db.run('COMMIT', (err) => {
-            if (err) {
-              return res.status(500).json({ error: 'Transaction failed' });
-            }
-            res.status(201).json({ id, amount, category, description, date });
-          });
-        }
+      await client.query(
+        'INSERT INTO expenses (id, amount, category, description, date) VALUES ($1, $2, $3, $4, $5)',
+        [id, amount, category, description || null, date]
       );
-    });
-  });
+      
+      await client.query('COMMIT');
+      return res.status(201).json({ id, amount, category, description, date });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('Transaction failed:', err);
+      return res.status(500).json({ error: 'Failed to create expense transaction' });
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error('Database error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 if (process.env.NODE_ENV !== 'test') {

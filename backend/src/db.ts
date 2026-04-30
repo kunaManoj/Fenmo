@@ -1,29 +1,41 @@
-import sqlite3 from 'sqlite3';
-import path from 'path';
+import { Pool } from 'pg';
+import dotenv from 'dotenv';
 
-const isTest = process.env.NODE_ENV === 'test';
-const dbPath = isTest ? ':memory:' : path.resolve(__dirname, '../../database.sqlite');
-const db = new sqlite3.Database(dbPath);
+dotenv.config();
 
-// Initialize DB schema
-db.serialize(() => {
-  db.run(`
-    CREATE TABLE IF NOT EXISTS expenses (
-      id TEXT PRIMARY KEY,
-      amount REAL NOT NULL,
-      category TEXT NOT NULL,
-      description TEXT,
-      date TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-  
-  db.run(`
-    CREATE TABLE IF NOT EXISTS idempotency_keys (
-      key TEXT PRIMARY KEY,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
+// Create a new pool using the DATABASE_URL environment variable
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/fenmo',
+  // In production, we often need SSL enabled for cloud databases like Render
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
 });
 
-export default db;
+// Initialize DB schema
+const initDb = async () => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS expenses (
+        id UUID PRIMARY KEY,
+        amount DECIMAL(10, 2) NOT NULL,
+        category VARCHAR(255) NOT NULL,
+        description TEXT,
+        date DATE NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS idempotency_keys (
+        key VARCHAR(255) PRIMARY KEY,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log("PostgreSQL Database initialized successfully");
+  } catch (err) {
+    console.error("Error initializing PostgreSQL database:", err);
+  }
+};
+
+initDb();
+
+export default pool;
